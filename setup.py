@@ -45,6 +45,32 @@ if __name__ == '__main__':
         }
     )
 
+    setup(
+    name='MyMatmul',
+    ext_modules=[
+        CUDAExtension('MyMatmul', 
+            sources = ['multiply.cu',],
+            extra_compile_args={
+            "cxx": [ 
+                # "-g","-G",
+                    "-std=c++17"
+                   ],
+            "nvcc": [
+                "-O3",
+                # "-G",
+                # "-g",
+                # "-lineinfo",
+                "-use_fast_math",
+                "-std=c++17",
+                # "--gpu-architecture=sm_80",
+            ],},
+            # extra_link_args=["-o./complex2int8_vec"],
+        ),
+    ],
+    cmdclass={
+        'build_ext': BuildExtension
+    })
+
     
 
 
