@@ -33,11 +33,11 @@ inline void __getLastCudaError(const char *errorMessage, const char *file,
 
 #define M 16
 #define N 16
-#define K 16
+#define K 8
 
 #define WMMA_M 16
 #define WMMA_N 16
-#define WMMA_K 16
+#define WMMA_K 8
 
 #define blockDim_x 32*2
 #define blockDim_y 4
@@ -63,65 +63,6 @@ union Pack {
 };
 
 
-// template <typename scalar_t>
-__global__ void simple_wmma_gemm(half *a, half *b, float *c, float *d, int m_ld,
-                                 int n_ld, int k_ld, float alpha, float beta) {
-
-// Leading dimensions. Packed with no transpositions.
-  int lda = k_ld;
-  int ldb = k_ld;
-  int ldc = n_ld;
-
-  // Tile using a 2D grid
-  int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
-  int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
-
-  
-
-  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>  a_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major>  b_frag;
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
-
-  wmma::fill_fragment(acc_frag, 0.0f);
-
-  // Loop over k
-  for (int i = 0; i < k_ld; i += WMMA_K) {
-    int aCol = i;
-    int aRow = warpM * WMMA_M;
-    int bCol = warpN * N;
-    int bRow = i;
-
-    // Bounds checking
-    if (aRow < m_ld && aCol < k_ld && bRow < k_ld && bCol < n_ld) {
-      // Load the inputs
-      wmma::load_matrix_sync(a_frag, a + aCol + aRow * lda, lda);
-      wmma::load_matrix_sync(b_frag, b + bRow + bCol * ldb, ldb);
-
-      // Perform the matrix multiplication
-      wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-    }
-  }
-
-  // Load in the current value of c, scale it by beta, and add this our result
-  // scaled by alpha
-  int cCol = warpN * WMMA_N;
-  int cRow = warpM * WMMA_M;
-
-  if (cRow < m_ld && cCol < n_ld) {
-    wmma::load_matrix_sync(c_frag, c + cCol + cRow * ldc, ldc,
-                           wmma::mem_row_major);
-
-    for (int i = 0; i < c_frag.num_elements; i++) {
-      c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
-    }
-
-    // Store the output
-    wmma::store_matrix_sync(d + cCol + cRow * ldc, c_frag, ldc,
-                            wmma::mem_row_major);
-  }
-}
-
 #define colMajorIdx(rows, cols, i, j)    i + j*rows
 #define rowMajorIdx(rows, cols, i, j)    i * cols + j
 
@@ -134,11 +75,12 @@ __global__ void simple_fused_gemm_wmma(
                 int N0pad, int K0pad, int N1pad, int K1pad,
                 int lda0Pad, int ldb0Pad, int ldb1Pad,
                 int lda0, int ldb0, int ldb1){
-  extern __shared__ __half buffer[];
-  __half* inSmem = buffer;
-  __half* w0Smem = buffer + Mblock * K0pad;
-  __half* w1Smem = w0Smem + K0pad * N0pad;
-  __half* out0Smem = w1Smem + K1pad * N1pad;
+  extern __shared__ float buffer[];
+  extern __shared__ float bufferFloat[];
+  float* inSmem = buffer;
+  float* w0Smem = buffer + Mblock * K0pad;
+  float* w1Smem = w0Smem + K0pad * N0pad;
+  float* out0Smem = w1Smem + K1pad * N1pad;
 
   // Tile using a 2D grid
   int warpM = threadIdx.x / warpSize;
@@ -150,7 +92,7 @@ __global__ void simple_fused_gemm_wmma(
   for (int i = idx; i < Mblock * K0; i += blockDim.x * blockDim.y){
     int row = i / K0;
     int col = i % K0;
-    inSmem[row * K0pad + col] = __float2half(input[(row + offset) * K0 + col]); // Why?!!
+    inSmem[row * K0pad + col] = input[(row + offset) * K0 + col]; 
   }
 
 
@@ -158,241 +100,118 @@ __global__ void simple_fused_gemm_wmma(
   for (int i = idx; i < N0 * K0; i += blockDim.x * blockDim.y){
     int row = i % K0;
     int col = i / K0;
-    w0Smem[colMajorIdx(K0pad, N0pad, row, col)] = __float2half(weight0[i]);
+    w0Smem[colMajorIdx(K0pad, N0pad, row, col)] = weight0[i];
   }
 
   for (int i = idx; i < N1 * K1; i += blockDim.x * blockDim.y){
     int row = i % K1;
     int col = i / K1;
-    w1Smem[colMajorIdx(K1pad, N1pad, row, col)] = __float2half(weight1[i]);
+    w1Smem[colMajorIdx(K1pad, N1pad, row, col)] = weight1[i];
   }
   
-  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>  in_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major>  w0_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major>  w1_frag;
+  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::row_major>  in0_frag;
+  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::row_major>  in1_frag;
+  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::col_major>  w0_frag;
+  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::col_major>  w1_frag;
 
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, __half> acc0_frag;
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, __half> acc1_frag;
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> out1_frag;
+  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc0_frag;
+  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc1_frag;
+  // wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc0_frag;
+  // wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> out1_frag;
 
-  wmma::fill_fragment(acc0_frag, __float2half(0.0f));
-  wmma::fill_fragment(acc1_frag, __float2half(0.0f));
+  wmma::fill_fragment(acc0_frag, 0.0f);
+  wmma::fill_fragment(in1_frag, 0.0f);
+  wmma::fill_fragment(acc1_frag, 0.0f);
+  
+  // wmma::fill_fragment(acc0_frag, __float2float(0.0f));
 
   // First layer
   int aRow = warpM * WMMA_M;
   int bCol = warpN * WMMA_N;
   int cCol = warpN * WMMA_N;
   int cRow = warpM * WMMA_M;
+
   for (int i = 0; i < K0pad; i += WMMA_K) {
     int aCol = i;
     int bRow = i;
     // Bounds checking
     if (bCol < N0pad) {
       // Load the inputs
-      wmma::load_matrix_sync(in_frag, inSmem + aCol + aRow * K0pad, K0pad);
+      wmma::load_matrix_sync(in0_frag, inSmem + aCol + aRow * K0pad, K0pad);
       wmma::load_matrix_sync(w0_frag, w0Smem + bRow + bCol * K0pad, K0pad);
+
+      #pragma unroll
+      for (int t = 0; t < in0_frag.num_elements; t++) {
+              in0_frag.x[t] =  wmma::__float_to_tf32(in0_frag.x[t]);
+      }
+
+      #pragma unroll
+      for (int t = 0; t < w0_frag.num_elements; t++) {
+              w0_frag.x[t] =  wmma::__float_to_tf32(w0_frag.x[t]);
+      }
+
       // Perform the matrix multiplication
-      wmma::mma_sync(acc0_frag, in_frag, w0_frag, acc0_frag);
+      wmma::mma_sync(acc0_frag, in0_frag, w0_frag, acc0_frag);
     }
   }
-  // Store intermediate result into shared memory
+  
   if (bCol < N0pad) {
     wmma::store_matrix_sync(out0Smem  + cCol + cRow * N0pad, acc0_frag, N0pad,
                             wmma::mem_row_major);
   }
   __syncthreads();
-  __half * int1Smem = out0Smem;
+  float * in1Smem = out0Smem;
   // bias0
   for (int i = idx; i < Mblock * N0; i += blockDim.x * blockDim.y){
     int row = i / N0;
     int col = i % N0;
-    int1Smem[rowMajorIdx(Mblock, K1pad, row, col)] =  __hadd(int1Smem[rowMajorIdx(Mblock, K1pad, row, col)], __float2half(bias0[col])); // problemm
+    in1Smem[row*K1pad + col] +=  bias0[col]; // problem
   }
 
   __syncthreads();
   // activation0
   // Second layer
-  wmma::fill_fragment(in_frag, __float2half(0.0f));
-  wmma::fill_fragment(acc1_frag, __float2half(0.0f));
+  
+  __syncthreads();
   for (int i = 0; i < K1pad; i += WMMA_K) {
     int aCol = i;
     int bRow = i;
     // Bounds checking
     if (bCol < N1pad) {
       // Load the inputs
-      wmma::load_matrix_sync(in_frag, int1Smem + aCol + aRow * K1pad, K1pad);
+      wmma::load_matrix_sync(in1_frag, in1Smem + aCol + aRow * K1pad, K1pad);
       wmma::load_matrix_sync(w1_frag, w1Smem + bRow + bCol * K1pad, K1pad); // b multiply.cu:221 if idx == 192 || idx == 256
+      #pragma unroll
+      for (int t = 0; t < in1_frag.num_elements; t++) {
+              in1_frag.x[t] =  wmma::__float_to_tf32(in1_frag.x[t]);
+      }
+
+      #pragma unroll
+      for (int t = 0; t < w1_frag.num_elements; t++) {
+              w1_frag.x[t] =  wmma::__float_to_tf32(w1_frag.x[t]);
+      }
+
       // Perform the matrix multiplication
-      wmma::mma_sync(acc1_frag, in_frag, w1_frag, acc1_frag);
+      wmma::mma_sync(acc1_frag, in1_frag, w1_frag, acc1_frag);
     }
   }
   __syncthreads();
-  __half* outSmem = buffer;
-  // Store intermediate result into shared memory
+  float * outSmem = buffer;
   if (bCol < N1pad) {
     wmma::store_matrix_sync(outSmem  + cCol + cRow * N1pad, acc1_frag, N1pad,
-                            wmma::mem_row_major); //problem
+                            wmma::mem_row_major);
   }
   __syncthreads();
   // bias0
   for (int i = idx; i < Mblock * N1; i += blockDim.x * blockDim.y){
     int row = i / N1;
     int col = i % N1;
-    outSmem[rowMajorIdx(Mblock, N1pad, row, col)] =__hadd(outSmem[rowMajorIdx(Mblock, N1pad, row, col)], __float2half(bias1[col]));
-  }
-  __syncthreads();
-
-  // activation1
-
-  // Store output into global mem
-  // int offset = blockIdx.x * Mblock; // row offset of this block
-  for (int i = idx; i < Mblock * N1; i += blockDim.x * blockDim.y){
-    int row = i / N1;
-    int col = i % N1;
-    output[(row + offset) * N1 + col] = __half2float(outSmem[row * N1pad + col]); 
-      // rowMajorIdx(M0, N1, , col)] = __half2float(outSmem[rowMajorIdx(Mblock, N1pad, row, col)]); // problem outSmem right, but global wrong
+    // outSmem[row*N1pad + col] +=  bias1[col]; // problem
+    output[(row + offset) * N1 + col] = outSmem[row*N1pad + col] + bias1[col];
   }
 
 }
 
-__global__ void smem_wmma_gemm(half *a, half *b, float *c, float *d, int m_ld,
-                                 int n_ld, int k_ld, float alpha, float beta) {
-
-// Leading dimensions. Packed with no transpositions.
-  int lda = k_ld;
-  int ldb = k_ld;
-  int ldc = n_ld;
-  const int packed_size = 8;
-  const int grp = 4; //(blockDim_x*blockDim_y*packed_size) / (warp_x*WMMA_M*WMMA_K);
-  __shared__ half Asmem[warp_x*WMMA_M*WMMA_K*grp*2];
-  __shared__ half Bsmem[warp_y*WMMA_N*WMMA_K*grp*2];
-  // __shared__ half Csmem[warp_x*WMMA_M][warp_y*WMMA_N];
-  // Tile using a 2D grid
-  int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
-  int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
-
-  int blockM = warpM/warp_y;
-  int blockN = warpN/warp_x;
-
-  int idx = threadIdx.y * blockDim.x + threadIdx.x; // local index within a block
-  // if (threadIdx.x == 0 & threadIdx.y == 0){
-  //   printf("blockM %d, blockN %d\n", blockM, blockN);
-  // }
-
-  // load data into the shared memory
-  
-  
-  int a_row = blockM * warp_y * WMMA_M;
-  int b_col = blockN * warp_x * WMMA_N;
-
-  // copy M
-  for (int j = idx*packed_size; j < warp_y*WMMA_M*WMMA_K*grp; j += blockDim.x*blockDim.y*packed_size){
-    int row = j/(WMMA_K*grp); int col = j%(WMMA_K*grp);
-    reinterpret_cast<Pack<half, packed_size>*> (&Asmem[j])[0] = reinterpret_cast<Pack<half, packed_size>*> (a + (a_row+row) * k_ld + col)[0];
-    // Asmem[i] = *(a + a_row * k_ld + i);
-  }
-
-  // copy N
-  for (int j = idx*packed_size ; j < warp_x*WMMA_N*WMMA_K*grp; j += blockDim.x*blockDim.y*packed_size){
-    int row = j%(WMMA_K*grp); int col = j/(WMMA_K*grp);
-    reinterpret_cast<Pack<half, packed_size>*> (&Bsmem[j])[0] = reinterpret_cast<Pack<half, packed_size>*> (b + (b_col+col) * k_ld + row)[0];
-  }
-   __syncthreads();
-
-  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>  a_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major>  b_frag;
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
-  // wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
-
-  wmma::fill_fragment(acc_frag, 0.0f);
-  int ptr = 0;
-  // Loop over k
-  for (int i = 0; i < k_ld; i += WMMA_K) {
-    int aCol = i%(WMMA_K*grp);
-    int aRow = (warpM % warp_y) * WMMA_M;// int aRow = warpM * WMMA_M;
-    int bCol = (warpN % warp_x) * N; //int bCol = warpN * N;
-    int bRow = i%(WMMA_K*grp);
-
-    half* Aptr = Asmem + ptr*warp_x*WMMA_M*WMMA_K*grp; 
-    half* Bptr = Bsmem + ptr*warp_y*WMMA_N*WMMA_K*grp;
-
-    half* AptrN = Asmem + (1-ptr)*warp_x*WMMA_M*WMMA_K*grp; 
-    half* BptrN = Bsmem + (1-ptr)*warp_y*WMMA_N*WMMA_K*grp;
-    // Bounds checking
-    if (aRow < m_ld && aCol < k_ld && bRow < k_ld && bCol < n_ld) {
-      // Load the inputs
-      // wmma::load_matrix_sync(a_frag, a + aCol + aRow * lda, lda);
-      // wmma::load_matrix_sync(b_frag, b + bRow + bCol * ldb, ldb);
-      wmma::load_matrix_sync(a_frag, Aptr + aRow * WMMA_K *grp + aCol, WMMA_K *grp);
-      wmma::load_matrix_sync(b_frag, Bptr + bCol * WMMA_K *grp + bRow, WMMA_K *grp);
-
-      // Perform the matrix multiplication
-      wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-    }
-    if ( (i%(WMMA_K*grp) == 0) & (i < k_ld-WMMA_K*grp)){
-      ptr = 1-ptr;
-      // copy M
-      for (int j = idx*packed_size; j < warp_y*WMMA_M*WMMA_K*grp; j += blockDim.x*blockDim.y*packed_size){
-        int row = j/(WMMA_K*grp); int col = j%(WMMA_K*grp);
-        reinterpret_cast<Pack<half, packed_size>*> (AptrN + j)[0] = reinterpret_cast<Pack<half, packed_size>*> (a + (a_row+row) * k_ld + col + i+WMMA_K*grp)[0];
-        // Asmem[i] = *(a + a_row * k_ld + i);
-      }
-
-      // copy N
-      for (int j = idx*packed_size ; j < warp_x*WMMA_N*WMMA_K*grp; j += blockDim.x*blockDim.y*packed_size){
-        int row = j%(WMMA_K*grp); int col = j/(WMMA_K*grp);
-        reinterpret_cast<Pack<half, packed_size>*> (BptrN + j)[0] = reinterpret_cast<Pack<half, packed_size>*> (b + (b_col+col) * k_ld + row + i+WMMA_K*grp)[0];
-      }
-      // __syncthreads();
-    }
-    
-  }
-
-  // Load in the current value of c, scale it by beta, and add this our result
-  // scaled by alpha
-  int cCol = warpN * WMMA_N;
-  int cRow = warpM * WMMA_M;
-
-  if (cRow < m_ld && cCol < n_ld) {
-    // wmma::load_matrix_sync(c_frag, c + cCol + cRow * ldc, ldc,
-    //                        wmma::mem_row_major);
-
-    // for (int i = 0; i < c_frag.num_elements; i++) {
-    //   c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
-    // }
-
-    // Store the output
-    wmma::store_matrix_sync(d + cCol + cRow * ldc, acc_frag, ldc,
-                            wmma::mem_row_major);
-  }
-}
-
-
-// void simple_gemm(torch::Tensor& A, torch::Tensor& B, torch::Tensor& C, torch::Tensor& D, float alpha, float beta) {
-
-//     //开启线程数量
-//     int M0; int N0; int K0; int M1; int N1; int K1; 
-//     dim3 gridDim;
-//     dim3 blockDim;
-
-//     // blockDim.x must be a multple of warpSize
-//     // 128x4 means we have 16 warps and a block computes a 64x64 output tile
-//     blockDim.x = blockDim_x;
-//     blockDim.y = (N_GLOBAL + WMMA_M - 1) / WMMA_M;
-
-//     gridDim.x = (M_GLOBAL + (WMMA_M * blockDim.x / warp_size - 1)) /
-//                 (WMMA_M * blockDim.x / warp_size);
-//     gridDim.y = (N_GLOBAL + WMMA_N * blockDim.y - 1) / (WMMA_N * blockDim.y);
-
-//     printf("Computing... using simple_wmma_gemm kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-//     // AT_DISPATCH_FLOATING_TYPES_AND_HALF(A.type(), "simple_wmma_gemm", ([&] {
-//       simple_wmma_gemm<<<gridDim, blockDim>>>(reinterpret_cast<half*>(A.data_ptr<torch::Half>()), 
-//                                               reinterpret_cast<half*>(B.data_ptr<torch::Half>()), 
-//                                               C.data_ptr<float>(),
-//                                               D.data_ptr<float>(), M_GLOBAL, N_GLOBAL,
-//                                               K_GLOBAL, alpha, beta);
-//     // }));
-// }
 
 torch::Tensor  simple_fused_gemm(torch::Tensor& input, 
                         torch::Tensor& weight0, 
@@ -448,11 +267,11 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
     int Mblock = (blockDim_x/warp_size) * WMMA_M; // how many rows a block can deal with
     int smem_size = (Mblock * K0pad + 
                       K0pad * N0pad +  K1pad * N1pad +
-                      Mblock * N0pad ) * sizeof(half);
+                      Mblock * N0pad ) * sizeof(float);
 
     printf("Computing... using simple_fused_gemm_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-    // AT_DISPATCH_FLOATING_TYPES_AND_HALF(A.type(), "simple_wmma_gemm", ([&] {
-    simple_fused_gemm_wmma<<<gridDim, blockDim, max(smem_size, int(Mblock * N1pad * sizeof(half)))>>>(input.data_ptr<float>(), 
+    // AT_DISPATCH_FLOATING_TYPES_AND_float(A.type(), "simple_wmma_gemm", ([&] {
+    simple_fused_gemm_wmma<<<gridDim, blockDim, max(smem_size, int(Mblock * N1pad * sizeof(float)))>>>(input.data_ptr<float>(), 
                                                   weight0.data_ptr<float>(), 
                                                   bias0.data_ptr<float>(), 
                                                   weight1.data_ptr<float>(),
@@ -469,34 +288,6 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
 
     getLastCudaError("simple_fused_gemm_wmma launch failed\n");
     return output;
-}
-
-void smem_gemm(torch::Tensor& A, torch::Tensor& B, torch::Tensor& C, torch::Tensor& D, float alpha, float beta) {
-
-   //开启线程数量
-    int M_GLOBAL = A.size(0);
-    int N_GLOBAL = D.size(0);
-    int K_GLOBAL = A.size(1);
-    dim3 gridDim;
-    dim3 blockDim;
-
-    // blockDim.x must be a multple of warpSize
-    // 128x4 means we have 16 warps and a block computes a 64x64 output tile
-    blockDim.x = blockDim_x;
-    blockDim.y = (N_GLOBAL + WMMA_M - 1) / WMMA_M;
-
-    gridDim.x = (M_GLOBAL + (WMMA_M * blockDim.x / warp_size - 1)) /
-                (WMMA_M * blockDim.x / warp_size);
-    gridDim.y = (N_GLOBAL + WMMA_N * blockDim.y - 1) / (WMMA_N * blockDim.y);
-
-    printf("Computing... using simple_wmma_gemm kernel, gridDim.x %d, gridDim.y %d\n", gridDim.x, gridDim.y);
-    // AT_DISPATCH_FLOATING_TYPES_AND_HALF(A.type(), "simple_wmma_gemm", ([&] {
-      smem_wmma_gemm<<<gridDim, blockDim>>>(reinterpret_cast<half*>(A.data_ptr<torch::Half>()), 
-                                              reinterpret_cast<half*>(B.data_ptr<torch::Half>()), 
-                                              C.data_ptr<float>(),
-                                              D.data_ptr<float>(), M_GLOBAL, N_GLOBAL,
-                                              K_GLOBAL, alpha, beta);
-    // }));
 }
 
 
