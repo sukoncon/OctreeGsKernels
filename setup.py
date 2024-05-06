@@ -20,10 +20,10 @@ debug options: extra_compile_args={'cxx': ['-std=c++17 -O3 -g'],
 if __name__ == '__main__':
 
     setup(
-    name='CudaKernels',
+    name='fusedKernels',
     ext_modules=[
-        CUDAExtension('CudaKernels', 
-        sources=  ['main.cu',],
+        CUDAExtension('fusedKernels', 
+        sources=  ['generateGSneural.cu',],
         include_dirs=[python_include_dir,
                 # os.path.join(os.getcwd(),"cuda_kernel/include"),
                 ],
