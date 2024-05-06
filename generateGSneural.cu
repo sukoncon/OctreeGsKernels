@@ -51,6 +51,10 @@ void simpleIdx(torch::Tensor indata,
      }));
 }
 
+
+
+
+
 torch::Tensor simpleMask(torch::Tensor indata, 
                 torch::Tensor maskIdx){
                 
@@ -82,7 +86,103 @@ torch::Tensor simpleMask(torch::Tensor indata,
      return outdata;
 }
 
+template<typename T, int pack_size>
+struct GetPackType {
+  using type = typename std::aligned_storage<pack_size * sizeof(T), pack_size * sizeof(T)>::type;
+};
 
+template<typename T, int pack_size>
+using PackType = typename GetPackType<T, pack_size>::type;
+
+template<typename T, const int pack_size>
+union Pack {
+  PackType<T, pack_size> storage;
+  T elem[pack_size];
+};
+
+__global__ void ob_property_kernel(const int rows,
+                                const int width,
+                                float* indata,
+                                float* anchors,
+                               float* obview,
+                               int64_t *maskIdx,
+                               float* ob_dist,
+                               float* center){
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < rows){
+        int out_row = idx;
+        long in_row = maskIdx[out_row];
+
+        float anchor[3];
+        float view[3];
+        float dist = 0;
+        for (int i = 0; i < width; i++){
+            anchor[i] = indata[in_row * width + i];
+            view[i] = anchor[i] - center[i];
+            dist += view[i] * view[i];
+        }
+        dist = sqrtf(dist);
+        for (int i = 0; i < width; i++){
+            view[i] /= dist;
+            anchors[out_row*width + i] = anchor[i];
+            obview[out_row*width + i] = view[i]; 
+        }
+       
+        ob_dist[idx] = dist;
+    }
+}
+
+/*
+equals to:
+    anchor = fusedKernels.simpleMask(anchor, visible_idx)
+    # get view properties for anchor
+    ob_view = anchor - camera_center
+    # dist
+    ob_dist = ob_view.norm(dim=1, keepdim=True)
+    # view
+    ob_view = ob_view / ob_dist
+*/
+std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor maskIdx, torch::Tensor center, int dim){
+
+    if(dim != 1){
+      throw std::invalid_argument("Dimension normalization is only supported for a value of 1.");
+    }
+
+    const int width = indata.numel()/indata.size(0);
+    const int height = maskIdx.size(0);
+
+    if(width != 3){
+      throw std::invalid_argument("only support width of 3.");
+    }
+    
+    // Get Input Tensor Shape info
+    auto orig_shape = indata.sizes(); // auto -> c10::IntArrayRef
+
+    /* Clone original shape details into another instance*/ 
+    std::vector<int64_t> out_shape(orig_shape.begin(), orig_shape.end());
+    /* Modify first entry i.e. 0th position item */ 
+    out_shape[0] = height;
+    torch::Tensor anchor = torch::empty({out_shape}, indata.options());
+    torch::Tensor ob_view = torch::empty({out_shape}, indata.options());
+    out_shape[1] = 1;
+    torch::Tensor ob_dist = torch::empty({out_shape}, indata.options());
+
+    const uint32_t gridDIM = (height + blockDIM-1)/blockDIM;
+
+    ob_property_kernel<<<gridDIM, blockDIM>>>(
+        height,
+        width,
+        reinterpret_cast<float*>(indata.data_ptr()),
+        reinterpret_cast<float*>(anchor.data_ptr()), 
+        reinterpret_cast<float*>(ob_view.data_ptr()),
+        maskIdx.data_ptr<int64_t>(),
+        ob_dist.data_ptr<float>(),
+        center.data_ptr<float>());
+
+
+    return {anchor, ob_view, ob_dist};
+
+}
 
 template <typename scalar_t>
 __global__ void catRepeatMaskSplit_kernel(
@@ -358,9 +458,12 @@ void SelfContainedFeat(torch::Tensor feat,
 
 
 
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("simpleIdx", &simpleIdx, "simpleIdx (CUDA)");
     m.def("simpleMask", &simpleMask, "simpleMask (CUDA)");
+    m.def("ob_property", &ob_property, "ob_property (CUDA)");
     m.def("catRepeatMaskSplit", &catRepeatMaskSplit, "catRepeatMask (CUDA)");
     m.def("RepeatMask", &RepeatMask, "catRepeatMask (CUDA)");
     m.def("MaskPostProcessColor", &MaskPostProcessColor, "mask and post-process color (CUDA)");
