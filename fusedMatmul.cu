@@ -66,11 +66,51 @@ union Pack {
 #define colMajorIdx(rows, cols, i, j)    i + j*rows
 #define rowMajorIdx(rows, cols, i, j)    i * cols + j
 
+std::string lowercase(const std::string& inputString) {
+    std::string lowerCaseInput;
+    // Copying the input string into a new one for conversion:
+    lowerCaseInput.resize(inputString.size());
+    
+    // Transform all characters of the string to lowercase 
+    std::transform(
+        inputString.begin(),  // First character
+        inputString.end(),   // Last character
+        lowerCaseInput.begin(),   // Output iterator
+        ::tolower            // Unary operation applied to each char  
+    );
+    
+    return lowerCaseInput; // Compare with desired lowercase output after conversion
+}
 
-__global__ void simple_fused_gemm_wmma(
+int convertActivation(std::string activation){
+  std::string loweractivation = lowercase(activation);
+  if (loweractivation == "relu") return 0;
+  if (loweractivation == "tanh") return 1;
+  if (loweractivation == "sigmoid") return 2;
+  else return -1;
+}
+
+template <typename T>
+__device__ void activate(int activation,
+                          T* input,
+                          size_t index
+                        ){
+      if (activation == -1) return;
+      if (activation == 0){
+        input[index] = (input[index] > T(0)) ? input[index] : T(0);
+      }
+      else if (activation == 1){
+        input[index] = tanh(input[index]);
+      }
+      else if (activation == 2){
+        input[index] = T(1) / (T(1) + expf(-input[index]));
+      }
+}
+
+__global__ void simple2layer_wmma(
                 float* input, float* weight0, float* bias0, float* weight1, float* bias1,
                 float* output,
-                std::string activation0, std::string activation1,
+                int activation0, int activation1,
                 int Mblock, int M0, int N0, int K0, int N1, int K1,
                 int N0pad, int K0pad, int N1pad, int K1pad,
                 int lda0Pad, int ldb0Pad, int ldb1Pad,
@@ -162,12 +202,18 @@ __global__ void simple_fused_gemm_wmma(
   }
   __syncthreads();
   float * in1Smem = out0Smem;
-  // bias0
+  // bias0 & activation 0
   for (int i = idx; i < Mblock * N0pad; i += blockDim.x * blockDim.y){
     int row = i / N0pad;
     int col = i % N0pad;
-    if (col < N0) in1Smem[row*N0pad + col] +=  bias0[col]; // problem
+    if (col < N0) {
+      in1Smem[row*N0pad + col] +=  bias0[col]; 
+      activate(activation0, in1Smem, row*N0pad + col);
+    }
+
   }
+
+
 
   // __syncthreads();
   // for (int i = idx; i < Mblock * K0pad; i += blockDim.x * blockDim.y){
@@ -268,12 +314,18 @@ __global__ void simple_fused_gemm_wmma(
                             wmma::mem_row_major);
   }
   __syncthreads();
-  // bias0
+
   for (int i = idx; i < Mblock * N1pad; i += blockDim.x * blockDim.y){
     int row = i / N1pad;
     int col = i % N1pad;
     
-    if (col<N1 & (row + offset) < M0) output[(row + offset) * N1 + col] = out1Smem[row*N1pad + col] + bias1[col];
+    if (col<N1 & (row + offset) < M0){
+      float out[1];
+      out[0] = out1Smem[row*N1pad + col] + bias1[col]; //bias 1
+      activate(activation1, out, 0); //activation 1
+      output[(row + offset) * N1 + col] = out[0];
+    }
+
 
     // if (blockIdx.x ==0 & col<N1){
     //   printf("idx %d, row %d, col %d, offset %d, out1Smem %f, output %f\n", 
@@ -284,7 +336,7 @@ __global__ void simple_fused_gemm_wmma(
 }
 
 
-torch::Tensor  simple_fused_gemm(torch::Tensor& input, 
+torch::Tensor  simple2layer(torch::Tensor& input, 
                         torch::Tensor& weight0, 
                         torch::Tensor& bias0, 
                         std::string activation0,
@@ -296,6 +348,10 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
     int M1; int N1; int K1; int K1pad; int N1pad;
     int lda0Pad; int ldb0Pad; int ldb1Pad;
     int lda0; int ldb0; int ldb1;
+
+    int act0 = convertActivation(activation0);
+    int act1 = convertActivation(activation1);
+
     // Assertion
 
     if (input.is_contiguous()){
@@ -340,15 +396,15 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
                       K0pad * N0pad +  K1pad * N1pad +
                       Mblock * N1pad + Mblock * K1pad) * sizeof(float);
 
-    // printf("Computing... using simple_fused_gemm_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-    simple_fused_gemm_wmma<<<gridDim, blockDim, smem_size>>>(input.data_ptr<float>(), 
+    // printf("Computing... using simple2layer_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
+    simple2layer_wmma<<<gridDim, blockDim, smem_size>>>(input.data_ptr<float>(), 
                                                   weight0.data_ptr<float>(), 
                                                   bias0.data_ptr<float>(), 
                                                   weight1.data_ptr<float>(),
                                                   bias1.data_ptr<float>(),
                                                   output.data_ptr<float>(),
-                                                  activation0, 
-                                                  activation1,
+                                                  act0, 
+                                                  act1,
                                                   Mblock, M0, N0, K0, N1, K1, 
                                                   N0pad,  K0pad, N1pad, K1pad, 
                                                   lda0Pad, ldb0Pad, ldb1Pad,
@@ -356,7 +412,7 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
                                                   ldb0,
                                                   ldb1);
 
-    getLastCudaError("simple_fused_gemm_wmma launch failed\n");
+    getLastCudaError("simple2layer_wmma launch failed\n");
     return output;
 }
 
@@ -364,6 +420,6 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // m.def("simple_gemm", &simple_gemm, "CUDA kernel: simple_gemm");
     // m.def("smem_gemm", &smem_gemm, "CUDA kernel: smem_gemm");
-    m.def("simple_fused_gemm", &simple_fused_gemm, "CUDA kernel: simple_fused_gemm");
+    m.def("simple2layer", &simple2layer, "CUDA kernel: simple2layer");
 
 }

@@ -46,10 +46,10 @@ if __name__ == '__main__':
     )
 
     setup(
-    name='MyMatmul',
+    name='FusedMatmul',
     ext_modules=[
-        CUDAExtension('MyMatmul', 
-            sources = ['multiply.cu',],
+        CUDAExtension('FusedMatmul', 
+            sources = ['fusedMatmul.cu',],
             extra_compile_args={
             "cxx": [ 
                 # "-g","-G",
