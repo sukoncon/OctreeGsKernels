@@ -76,11 +76,11 @@ __global__ void simple_fused_gemm_wmma(
                 int lda0Pad, int ldb0Pad, int ldb1Pad,
                 int lda0, int ldb0, int ldb1){
   extern __shared__ float buffer[];
-  extern __shared__ float bufferFloat[];
   float* inSmem = buffer;
   float* w0Smem = buffer + Mblock * K0pad;
   float* w1Smem = w0Smem + K0pad * N0pad;
   float* out0Smem = w1Smem + K1pad * N1pad;
+  float* out1Smem = out0Smem + Mblock * K1pad;
 
   // Tile using a 2D grid
   int warpM = threadIdx.x / warpSize;
@@ -89,24 +89,26 @@ __global__ void simple_fused_gemm_wmma(
 
   // load input into shared memory
   int offset = blockIdx.x * Mblock; // row offset of this block
-  for (int i = idx; i < Mblock * K0; i += blockDim.x * blockDim.y){
-    int row = i / K0;
-    int col = i % K0;
-    inSmem[row * K0pad + col] = input[(row + offset) * K0 + col]; 
+  for (int i = idx; i < Mblock * K0pad; i += blockDim.x * blockDim.y){
+    int row = i / K0pad;
+    int col = i % K0pad;
+    if (col < K0) inSmem[row * K0pad + col] = input[(row + offset) * K0 + col];
+    else inSmem[row * K0pad + col] = 0;
   }
-
 
   // load weights into shared memory
-  for (int i = idx; i < N0 * K0; i += blockDim.x * blockDim.y){
-    int row = i % K0;
-    int col = i / K0;
-    w0Smem[colMajorIdx(K0pad, N0pad, row, col)] = weight0[i];
+  for (int i = idx; i < N0pad * K0pad; i += blockDim.x * blockDim.y){
+    int row = i % K0pad;
+    int col = i / K0pad;
+    if (row < K0 & col < N0) w0Smem[row + col * K0pad] = weight0[row + col * K0];
+    else w0Smem[row + col * K0pad] = 0;
   }
 
-  for (int i = idx; i < N1 * K1; i += blockDim.x * blockDim.y){
-    int row = i % K1;
-    int col = i / K1;
-    w1Smem[colMajorIdx(K1pad, N1pad, row, col)] = weight1[i];
+  for (int i = idx; i < N1pad * K1pad; i += blockDim.x * blockDim.y){
+    int row = i % K1pad;
+    int col = i / K1pad;
+    if (row < K1 & col < N1) w1Smem[row + col * K1pad] = weight1[row + col * K1];
+    else w1Smem[row + col * K1pad] = 0;
   }
   
   wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::row_major>  in0_frag;
@@ -120,10 +122,9 @@ __global__ void simple_fused_gemm_wmma(
   // wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> out1_frag;
 
   wmma::fill_fragment(acc0_frag, 0.0f);
-  wmma::fill_fragment(in1_frag, 0.0f);
   wmma::fill_fragment(acc1_frag, 0.0f);
   
-  // wmma::fill_fragment(acc0_frag, __float2float(0.0f));
+  __syncthreads();
 
   // First layer
   int aRow = warpM * WMMA_M;
@@ -135,7 +136,7 @@ __global__ void simple_fused_gemm_wmma(
     int aCol = i;
     int bRow = i;
     // Bounds checking
-    if (bCol < N0pad) {
+    if (bCol < N0pad & (aRow + offset) < M0) {
       // Load the inputs
       wmma::load_matrix_sync(in0_frag, inSmem + aCol + aRow * K0pad, K0pad);
       wmma::load_matrix_sync(w0_frag, w0Smem + bRow + bCol * K0pad, K0pad);
@@ -154,30 +155,78 @@ __global__ void simple_fused_gemm_wmma(
       wmma::mma_sync(acc0_frag, in0_frag, w0_frag, acc0_frag);
     }
   }
-  
-  if (bCol < N0pad) {
+
+  if (bCol < N0pad & (aRow + offset) < M0) {
     wmma::store_matrix_sync(out0Smem  + cCol + cRow * N0pad, acc0_frag, N0pad,
                             wmma::mem_row_major);
   }
   __syncthreads();
   float * in1Smem = out0Smem;
   // bias0
-  for (int i = idx; i < Mblock * N0; i += blockDim.x * blockDim.y){
-    int row = i / N0;
-    int col = i % N0;
-    in1Smem[row*K1pad + col] +=  bias0[col]; // problem
+  for (int i = idx; i < Mblock * N0pad; i += blockDim.x * blockDim.y){
+    int row = i / N0pad;
+    int col = i % N0pad;
+    if (col < N0) in1Smem[row*N0pad + col] +=  bias0[col]; // problem
   }
 
+  // __syncthreads();
+  // for (int i = idx; i < Mblock * K0pad; i += blockDim.x * blockDim.y){
+  //   int row = i / K0pad;
+  //   int col = i % K0pad;
+    
+  //   if (blockIdx.x ==0){
+  //     printf("idx %d, row %d, col %d, offset %d, inSmem(after) %f\n", 
+  //     idx, row, col, offset, inSmem[row*K0pad + col]);
+  //   }
+
+  // }
+  // __syncthreads();
+  // for (int i = idx; i < K0pad * N0pad; i += blockDim.x * blockDim.y){
+  //   int row = i % K0pad;
+  //   int col = i / K0pad;
+    
+  //   if (blockIdx.x ==0){
+  //     printf("idx %d, row %d, col %d, offset %d, w0smem %f\n", 
+  //     idx, row, col, offset, w0Smem[row + K0pad * col]);
+  //   }
+
+  // }
+  // __syncthreads();
+  // for (int i = idx; i < K1pad * N1pad; i += blockDim.x * blockDim.y){
+  //   int row = i % K1pad;
+  //   int col = i / K1pad;
+    
+  //   // if (blockIdx.x ==0){
+  //     if (row < 17 &  w1Smem[row + K1pad * col] != 1) printf("row < 17 &  w1Smem[row + K1pad * col] != 1");
+  //     if (row >= 17 & w1Smem[row + K1pad * col] != 0) printf("row >= 17 & w1Smem[row + K1pad * col] != 0");
+  //     // printf("idx %d, row %d, col %d, offset %d, w1smem %f\n", 
+  //     // idx, row, col, offset, w1Smem[row + K1pad * col]);
+  //   // }
+
+  // }
+  // __syncthreads();
+  // for (int i = idx; i < Mblock * N0pad; i += blockDim.x * blockDim.y){
+  //   int row = i / N0pad;
+  //   int col = i % N0pad;
+    
+  //   // if (blockIdx.x ==0){
+  //     if (col < 17 & in1Smem[row*N0pad + col] != 35) printf("col < 17 & in1Smem[row*N0pad + col] != 35");
+  //     if (col >= 17 & in1Smem[row*N0pad + col] != 0) printf("col >= 17 & in1Smem[row*N0pad + col] != 0");
+  //     // printf("idx %d, row %d, col %d, offset %d, out0Smem %f, bias0 %f\n", 
+  //     // idx, row, col, offset, in1Smem[row*N0pad + col], bias0[col]);
+  //   // }
+
+  // }
+  
   __syncthreads();
   // activation0
   // Second layer
   
-  __syncthreads();
   for (int i = 0; i < K1pad; i += WMMA_K) {
     int aCol = i;
     int bRow = i;
     // Bounds checking
-    if (bCol < N1pad) {
+    if (bCol < N1pad & (aRow + offset) < M0) {
       // Load the inputs
       wmma::load_matrix_sync(in1_frag, in1Smem + aCol + aRow * K1pad, K1pad);
       wmma::load_matrix_sync(w1_frag, w1Smem + bRow + bCol * K1pad, K1pad); // b multiply.cu:221 if idx == 192 || idx == 256
@@ -195,19 +244,41 @@ __global__ void simple_fused_gemm_wmma(
       wmma::mma_sync(acc1_frag, in1_frag, w1_frag, acc1_frag);
     }
   }
-  __syncthreads();
-  float * outSmem = buffer;
-  if (bCol < N1pad) {
-    wmma::store_matrix_sync(outSmem  + cCol + cRow * N1pad, acc1_frag, N1pad,
+
+
+  // for (int i = idx; i < Mblock * N1pad; i += blockDim.x * blockDim.y){
+  //   out1Smem[i] = 0;
+  // }
+  // __syncthreads();
+  // for (int i = idx; i < Mblock * N1pad; i += blockDim.x * blockDim.y){
+  //   int row = i / N1pad;
+  //   int col = i % N1pad;
+    
+  //   if (blockIdx.x ==0){
+  //     printf("idx %d, row %d, col %d, offset %d, out1Smem(before) %f\n", 
+  //     idx, row, col, offset, out1Smem[row*N1pad + col]);
+  //   }
+
+  // }
+
+  // __syncthreads();
+  
+  if (cCol < N1pad & (aRow + offset) < M0) {
+    wmma::store_matrix_sync(out1Smem  + cCol + cRow * N1pad, acc1_frag, N1pad,
                             wmma::mem_row_major);
   }
   __syncthreads();
   // bias0
-  for (int i = idx; i < Mblock * N1; i += blockDim.x * blockDim.y){
-    int row = i / N1;
-    int col = i % N1;
-    // outSmem[row*N1pad + col] +=  bias1[col]; // problem
-    output[(row + offset) * N1 + col] = outSmem[row*N1pad + col] + bias1[col];
+  for (int i = idx; i < Mblock * N1pad; i += blockDim.x * blockDim.y){
+    int row = i / N1pad;
+    int col = i % N1pad;
+    
+    if (col<N1 & (row + offset) < M0) output[(row + offset) * N1 + col] = out1Smem[row*N1pad + col] + bias1[col];
+
+    // if (blockIdx.x ==0 & col<N1){
+    //   printf("idx %d, row %d, col %d, offset %d, out1Smem %f, output %f\n", 
+    //   idx, row, col, offset, out1Smem[row*N1pad + col], output[(row + offset) * N1 + col]);
+    // }
   }
 
 }
@@ -237,13 +308,13 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
     if (weight0.is_contiguous()){
       N0 = weight0.size(0); ldb0 = weight0.strides()[0];
       N0pad = ((N0 + WMMA_N - 1) / WMMA_N) * WMMA_N;
+      K1pad = N0pad;
       ldb0Pad = K0pad;
     }
     else {throw std::runtime_error("Not implemented for discontiguous WEIGHT0 tensor.");}
 
     if (weight1.is_contiguous()){
       N1 = weight1.size(0); K1 = weight1.size(1); ldb1 = weight1.strides()[0];
-      K1pad = ((K1 + WMMA_K - 1) / WMMA_K) * WMMA_K;
       N1pad = ((N1 + WMMA_N - 1) / WMMA_N) * WMMA_N;
       ldb1Pad = K1pad;
     }
@@ -267,11 +338,10 @@ torch::Tensor  simple_fused_gemm(torch::Tensor& input,
     int Mblock = (blockDim_x/warp_size) * WMMA_M; // how many rows a block can deal with
     int smem_size = (Mblock * K0pad + 
                       K0pad * N0pad +  K1pad * N1pad +
-                      Mblock * N0pad ) * sizeof(float);
+                      Mblock * N1pad + Mblock * K1pad) * sizeof(float);
 
-    printf("Computing... using simple_fused_gemm_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-    // AT_DISPATCH_FLOATING_TYPES_AND_float(A.type(), "simple_wmma_gemm", ([&] {
-    simple_fused_gemm_wmma<<<gridDim, blockDim, max(smem_size, int(Mblock * N1pad * sizeof(float)))>>>(input.data_ptr<float>(), 
+    // printf("Computing... using simple_fused_gemm_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
+    simple_fused_gemm_wmma<<<gridDim, blockDim, smem_size>>>(input.data_ptr<float>(), 
                                                   weight0.data_ptr<float>(), 
                                                   bias0.data_ptr<float>(), 
                                                   weight1.data_ptr<float>(),
