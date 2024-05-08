@@ -31,18 +31,13 @@ inline void __getLastCudaError(const char *errorMessage, const char *file,
   }
 }
 
-#define M 16
-#define N 16
-#define K 8
-
 #define WMMA_M 16
 #define WMMA_N 16
-#define WMMA_K 8
+#define WMMA_K 16
 
 #define blockDim_x 32*2
 #define blockDim_y 4
-#define warp_x 4 // X coordinate of warps in a block
-#define warp_y 4 // Y coordinate of warps in a block
+
 #define warp_size 32
 
 using namespace nvcuda;
@@ -115,11 +110,14 @@ __global__ void simple2layer_wmma(
                 int N0pad, int K0pad, int N1pad, int K1pad,
                 int lda0Pad, int ldb0Pad, int ldb1Pad,
                 int lda0, int ldb0, int ldb1){
-  extern __shared__ float buffer[];
-  float* inSmem = buffer;
-  float* w0Smem = buffer + Mblock * K0pad;
-  float* w1Smem = w0Smem + K0pad * N0pad;
-  float* out0Smem = w1Smem + K1pad * N1pad;
+
+  extern __shared__ float bufferF[];
+  extern __shared__ __half bufferH[];
+  __half* inSmem = bufferH;
+  __half* w0Smem = bufferH + Mblock * K0pad;
+  __half* w1Smem = w0Smem + K0pad * N0pad;
+  __half* in1Smem = w1Smem + K1pad * N1pad;
+  float* out0Smem = bufferF + (Mblock * K0pad + K0pad * N0pad + K1pad * N1pad + Mblock * N1pad) / 2;
   float* out1Smem = out0Smem + Mblock * K1pad;
 
   // Tile using a 2D grid
@@ -132,29 +130,29 @@ __global__ void simple2layer_wmma(
   for (int i = idx; i < Mblock * K0pad; i += blockDim.x * blockDim.y){
     int row = i / K0pad;
     int col = i % K0pad;
-    if (col < K0) inSmem[row * K0pad + col] = input[(row + offset) * K0 + col];
-    else inSmem[row * K0pad + col] = 0;
+    if (col < K0) inSmem[row * K0pad + col] = __float2half(input[(row + offset) * K0 + col]);
+    else inSmem[row * K0pad + col] = __float2half(0.f);
   }
 
   // load weights into shared memory
   for (int i = idx; i < N0pad * K0pad; i += blockDim.x * blockDim.y){
     int row = i % K0pad;
     int col = i / K0pad;
-    if (row < K0 & col < N0) w0Smem[row + col * K0pad] = weight0[row + col * K0];
-    else w0Smem[row + col * K0pad] = 0;
+    if (row < K0 & col < N0) w0Smem[row + col * K0pad] = __float2half(weight0[row + col * K0]);
+    else w0Smem[row + col * K0pad] = __float2half(0.f);
   }
 
   for (int i = idx; i < N1pad * K1pad; i += blockDim.x * blockDim.y){
     int row = i % K1pad;
     int col = i / K1pad;
-    if (row < K1 & col < N1) w1Smem[row + col * K1pad] = weight1[row + col * K1];
-    else w1Smem[row + col * K1pad] = 0;
+    if (row < K1 & col < N1) w1Smem[row + col * K1pad] = __float2half(weight1[row + col * K1]);
+    else w1Smem[row + col * K1pad] = __float2half(0.f);
   }
   
-  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::row_major>  in0_frag;
-  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::row_major>  in1_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::col_major>  w0_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::col_major>  w1_frag;
+  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major>  in0_frag;
+  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major>  in1_frag;
+  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::col_major>  w0_frag;
+  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::col_major>  w1_frag;
 
   wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc0_frag;
   wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc1_frag;
@@ -181,15 +179,15 @@ __global__ void simple2layer_wmma(
       wmma::load_matrix_sync(in0_frag, inSmem + aCol + aRow * K0pad, K0pad);
       wmma::load_matrix_sync(w0_frag, w0Smem + bRow + bCol * K0pad, K0pad);
 
-      #pragma unroll
-      for (int t = 0; t < in0_frag.num_elements; t++) {
-              in0_frag.x[t] =  wmma::__float_to_tf32(in0_frag.x[t]);
-      }
+      // #pragma unroll
+      // for (int t = 0; t < in0_frag.num_elements; t++) {
+      //         in0_frag.x[t] =  wmma::__float_to_tf32(in0_frag.x[t]);
+      // }
 
-      #pragma unroll
-      for (int t = 0; t < w0_frag.num_elements; t++) {
-              w0_frag.x[t] =  wmma::__float_to_tf32(w0_frag.x[t]);
-      }
+      // #pragma unroll
+      // for (int t = 0; t < w0_frag.num_elements; t++) {
+      //         w0_frag.x[t] =  wmma::__float_to_tf32(w0_frag.x[t]);
+      // }
 
       // Perform the matrix multiplication
       wmma::mma_sync(acc0_frag, in0_frag, w0_frag, acc0_frag);
@@ -201,16 +199,16 @@ __global__ void simple2layer_wmma(
                             wmma::mem_row_major);
   }
   __syncthreads();
-  float * in1Smem = out0Smem;
   // bias0 & activation 0
   for (int i = idx; i < Mblock * N0pad; i += blockDim.x * blockDim.y){
     int row = i / N0pad;
     int col = i % N0pad;
     if (col < N0) {
-      in1Smem[row*N0pad + col] +=  bias0[col]; 
-      activate(activation0, in1Smem, row*N0pad + col);
-    }
-
+      float tmp[1];
+      tmp[0] = out0Smem[row*N0pad + col] + bias0[col];
+      activate(activation0, tmp, 0);
+      in1Smem[row*N0pad + col] = __float2half(tmp[0]);
+    }else in1Smem[row*N0pad + col] = __float2half(0.f);
   }
 
 
@@ -222,7 +220,7 @@ __global__ void simple2layer_wmma(
     
   //   if (blockIdx.x ==0){
   //     printf("idx %d, row %d, col %d, offset %d, inSmem(after) %f\n", 
-  //     idx, row, col, offset, inSmem[row*K0pad + col]);
+  //     idx, row, col, offset, __half2float(inSmem[row*K0pad + col]));
   //   }
 
   // }
@@ -233,7 +231,7 @@ __global__ void simple2layer_wmma(
     
   //   if (blockIdx.x ==0){
   //     printf("idx %d, row %d, col %d, offset %d, w0smem %f\n", 
-  //     idx, row, col, offset, w0Smem[row + K0pad * col]);
+  //     idx, row, col, offset, __half2float(w0Smem[row + K0pad * col]));
   //   }
 
   // }
@@ -249,18 +247,17 @@ __global__ void simple2layer_wmma(
   //     // idx, row, col, offset, w1Smem[row + K1pad * col]);
   //   // }
 
-  // }
+  // // }
   // __syncthreads();
   // for (int i = idx; i < Mblock * N0pad; i += blockDim.x * blockDim.y){
   //   int row = i / N0pad;
   //   int col = i % N0pad;
     
-  //   // if (blockIdx.x ==0){
-  //     if (col < 17 & in1Smem[row*N0pad + col] != 35) printf("col < 17 & in1Smem[row*N0pad + col] != 35");
-  //     if (col >= 17 & in1Smem[row*N0pad + col] != 0) printf("col >= 17 & in1Smem[row*N0pad + col] != 0");
-  //     // printf("idx %d, row %d, col %d, offset %d, out0Smem %f, bias0 %f\n", 
-  //     // idx, row, col, offset, in1Smem[row*N0pad + col], bias0[col]);
-  //   // }
+  //   if (blockIdx.x ==0){
+
+  //     printf("idx %d, row %d, col %d, offset %d, out0Smem %f, bias0 %f\n", 
+  //     idx, row, col, offset, __half2float(in1Smem[row*N0pad + col]), bias0[col]);
+  //   }
 
   // }
   
@@ -276,15 +273,15 @@ __global__ void simple2layer_wmma(
       // Load the inputs
       wmma::load_matrix_sync(in1_frag, in1Smem + aCol + aRow * K1pad, K1pad);
       wmma::load_matrix_sync(w1_frag, w1Smem + bRow + bCol * K1pad, K1pad); // b multiply.cu:221 if idx == 192 || idx == 256
-      #pragma unroll
-      for (int t = 0; t < in1_frag.num_elements; t++) {
-              in1_frag.x[t] =  wmma::__float_to_tf32(in1_frag.x[t]);
-      }
+      // #pragma unroll
+      // for (int t = 0; t < in1_frag.num_elements; t++) {
+      //         in1_frag.x[t] =  wmma::__float_to_tf32(in1_frag.x[t]);
+      // }
 
-      #pragma unroll
-      for (int t = 0; t < w1_frag.num_elements; t++) {
-              w1_frag.x[t] =  wmma::__float_to_tf32(w1_frag.x[t]);
-      }
+      // #pragma unroll
+      // for (int t = 0; t < w1_frag.num_elements; t++) {
+      //         w1_frag.x[t] =  wmma::__float_to_tf32(w1_frag.x[t]);
+      // }
 
       // Perform the matrix multiplication
       wmma::mma_sync(acc1_frag, in1_frag, w1_frag, acc1_frag);
@@ -392,9 +389,8 @@ torch::Tensor  simple2layer(torch::Tensor& input,
 
     // store input block + weights + intermediate result in shared memory
     int Mblock = (blockDim_x/warp_size) * WMMA_M; // how many rows a block can deal with
-    int smem_size = (Mblock * K0pad + 
-                      K0pad * N0pad +  K1pad * N1pad +
-                      Mblock * N1pad + Mblock * K1pad) * sizeof(float);
+    int smem_size = (Mblock * K0pad + K0pad * N0pad +  K1pad * N1pad + Mblock * N1pad) * sizeof(half) + // input + weights + intermediate output
+                      (Mblock * N1pad + Mblock * K1pad) * sizeof(float); // intermediate output + final output
 
     // printf("Computing... using simple2layer_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
     simple2layer_wmma<<<gridDim, blockDim, smem_size>>>(input.data_ptr<float>(), 
