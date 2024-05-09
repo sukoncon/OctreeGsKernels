@@ -20,7 +20,7 @@ debug options: extra_compile_args={'cxx': ['-std=c++17 -O3 -g'],
 if __name__ == '__main__':
 
     setup(
-    name='fusedKernels',
+    name='generateGSneural',
     ext_modules=[
         CUDAExtension('fusedKernels', 
         sources=  ['generateGSneural.cu',],
@@ -38,16 +38,6 @@ if __name__ == '__main__':
             ],
         },
         ),
-
-    ],
-    cmdclass={
-        'build_ext': BuildExtension
-        }
-    )
-
-    setup(
-    name='FusedMatmul',
-    ext_modules=[
         CUDAExtension('FusedMatmul', 
             sources = ['fusedMatmul.cu',],
             extra_compile_args={
@@ -66,12 +56,11 @@ if __name__ == '__main__':
             ],},
             # extra_link_args=["-o./complex2int8_vec"],
         ),
+
     ],
     cmdclass={
         'build_ext': BuildExtension
-    })
+        }
+    )
 
-    
-
-
-    
+   
