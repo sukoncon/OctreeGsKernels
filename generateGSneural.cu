@@ -108,7 +108,9 @@ __global__ void ob_property_kernel(const int rows,
                                scalar_t* obview,
                                int64_t *maskIdx,
                                scalar_t* ob_dist,
-                               float* center){
+                               const float x,
+                               const float y,
+                               const float z){
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < rows){
         int out_row = idx;
@@ -117,13 +119,20 @@ __global__ void ob_property_kernel(const int rows,
         scalar_t anchor[3];
         scalar_t view[3];
         scalar_t dist = 0;
-        for (int i = 0; i < width; i++){
+        #pragma unroll 
+        for (int i = 0; i < 3; i++){
             anchor[i] = indata[in_row * width + i];
-            view[i] = anchor[i] - center[i];
+        }
+        view[0] = anchor[0] - x;
+        view[1] = anchor[1] - y;
+        view[2] = anchor[2] - z;
+        #pragma unroll 
+        for (int i = 0; i < 3; i++){
             dist += view[i] * view[i];
         }
         dist = sqrtf(dist);
-        for (int i = 0; i < width; i++){
+        #pragma unroll 
+        for (int i = 0; i < 3; i++){
             view[i] /= dist;
             anchors[out_row*width + i] = anchor[i];
             obview[out_row*width + i] = view[i]; 
@@ -143,7 +152,7 @@ equals to:
     # view
     ob_view = ob_view / ob_dist
 */
-std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor maskIdx, torch::Tensor center, int dim){
+std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor maskIdx, float x, float y, float z, int dim){
 
     if(dim != 1){
       throw std::invalid_argument("Dimension normalization is only supported for a value of 1.");
@@ -181,7 +190,7 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
         ob_view.data_ptr<scalar_t>(),
         maskIdx.data_ptr<int64_t>(),
         ob_dist.data_ptr<scalar_t>(),
-        center.data_ptr<float>());
+        x, y, z);
         }));
 
 
