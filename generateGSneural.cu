@@ -100,22 +100,23 @@ union Pack {
   T elem[pack_size];
 };
 
+template <typename scalar_t>
 __global__ void ob_property_kernel(const int rows,
                                 const int width,
-                                float* indata,
-                                float* anchors,
-                               float* obview,
+                                scalar_t* indata,
+                                scalar_t* anchors,
+                               scalar_t* obview,
                                int64_t *maskIdx,
-                               float* ob_dist,
+                               scalar_t* ob_dist,
                                float* center){
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx < rows){
         int out_row = idx;
         long in_row = maskIdx[out_row];
 
-        float anchor[3];
-        float view[3];
-        float dist = 0;
+        scalar_t anchor[3];
+        scalar_t view[3];
+        scalar_t dist = 0;
         for (int i = 0; i < width; i++){
             anchor[i] = indata[in_row * width + i];
             view[i] = anchor[i] - center[i];
@@ -169,15 +170,19 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
 
     const uint32_t gridDIM = (height + blockDIM-1)/blockDIM;
 
-    ob_property_kernel<<<gridDIM, blockDIM>>>(
+    AT_DISPATCH_ALL_TYPES_AND_HALF(
+        indata.scalar_type(),
+        "ob_property_kernel",
+        ([&] {ob_property_kernel<scalar_t><<<gridDIM, blockDIM>>>(
         height,
         width,
-        reinterpret_cast<float*>(indata.data_ptr()),
-        reinterpret_cast<float*>(anchor.data_ptr()), 
-        reinterpret_cast<float*>(ob_view.data_ptr()),
+        indata.data_ptr<scalar_t>(),
+        anchor.data_ptr<scalar_t>(), 
+        ob_view.data_ptr<scalar_t>(),
         maskIdx.data_ptr<int64_t>(),
-        ob_dist.data_ptr<float>(),
+        ob_dist.data_ptr<scalar_t>(),
         center.data_ptr<float>());
+        }));
 
 
     return {anchor, ob_view, ob_dist};
@@ -412,26 +417,27 @@ void RepeatMaskPostProcessOffsets(
      }));
 }
 
+template <typename scalar_t>
 __global__ void SelfContainedFeat_kernel(
     const int width, //输出的宽度
     const int height,
     const uint64_t num_elements,
-    float *feat,
-    float *bank_weight){
+    scalar_t *feat,
+    scalar_t *bank_weight){
 
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    __shared__ float feats[blockDIM];
+    __shared__ scalar_t feats[blockDIM];
     if (idx < num_elements){
         int row = idx/width;
         int col = idx%width;
-        float3 weights = reinterpret_cast<float3*> (bank_weight + row*3) [0];
+        scalar_t* weights = bank_weight + row*3;
 
         feats[idx%(blockDIM)] = feat[idx];
         __syncthreads();
         int srow = idx%(blockDIM)/width; //row in shared memory
-        feat[row * width + col] = feats[srow*width + (col*4)%width] * weights.x
-                                + feats[srow*width + (col*2)%width] * weights.y
-                                + feats[srow*width + col]*weights.z;
+        feat[row * width + col] = feats[srow*width + (col*4)%width] * weights[0]
+                                + feats[srow*width + (col*2)%width] * weights[1]
+                                + feats[srow*width + col]*weights[2];
     }
 }
 /*
@@ -447,13 +453,16 @@ void SelfContainedFeat(torch::Tensor feat,
         const uint64_t num_elements = height*width;
         const uint32_t gridDIM = (num_elements+ blockDIM -1)/blockDIM;
 
-        SelfContainedFeat_kernel<<<gridDIM, blockDIM>>>
-        (
-        width, //输出的宽度
-        height,
-        num_elements,
-        feat.data_ptr<float>(),
-        bank_weight.data_ptr<float>());
+        AT_DISPATCH_ALL_TYPES_AND_HALF(
+            feat.scalar_type(), "SelfContainedFeat_kernel", ([&] {
+            SelfContainedFeat_kernel<scalar_t><<<gridDIM, blockDIM>>>
+            (
+            width, //输出的宽度
+            height,
+            num_elements,
+            feat.data_ptr<scalar_t>(),
+            bank_weight.data_ptr<scalar_t>());
+        }));
 }
 
 

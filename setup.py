@@ -34,7 +34,7 @@ if __name__ == '__main__':
                 "-O3",
                 "-use_fast_math",
                 "-std=c++17",
-                "--gpu-architecture=sm_80",
+                # "--gpu-architecture=sm_80",
             ],
         },
         ),

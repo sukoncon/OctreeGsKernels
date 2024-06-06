@@ -102,9 +102,28 @@ __device__ void activate(int activation,
       }
 }
 
+
+
+__device__ half convert2half(c10::Half data){
+  return data;
+}
+
+__device__ half convert2half(float data){
+  return __float2half(data);
+}
+
+__device__ float convert2float(c10::Half data){
+  return __half2float(data);
+}
+
+__device__ float convert2float(float data){
+  return data;
+}
+
+template <typename scalar_t>
 __global__ void simple2layer_wmma(
-                float* input, float* weight0, float* bias0, float* weight1, float* bias1,
-                float* output,
+                scalar_t* input, scalar_t* weight0, scalar_t* bias0, scalar_t* weight1, scalar_t* bias1,
+                scalar_t* output,
                 int activation0, int activation1,
                 int Mblock, int M0, int N0, int K0, int N1, int K1,
                 int N0pad, int K0pad, int N1pad, int K1pad,
@@ -130,23 +149,23 @@ __global__ void simple2layer_wmma(
   for (int i = idx; i < Mblock * K0pad; i += blockDim.x * blockDim.y){
     int row = i / K0pad;
     int col = i % K0pad;
-    if (col < K0) inSmem[row * K0pad + col] = __float2half(input[(row + offset) * K0 + col]);
-    else inSmem[row * K0pad + col] = __float2half(0.f);
+    if (col < K0) inSmem[row * K0pad + col] = convert2half(input[(row + offset) * K0 + col]);
+    else inSmem[row * K0pad + col] = convert2half(0.f);
   }
 
   // load weights into shared memory
   for (int i = idx; i < N0pad * K0pad; i += blockDim.x * blockDim.y){
     int row = i % K0pad;
     int col = i / K0pad;
-    if (row < K0 & col < N0) w0Smem[row + col * K0pad] = __float2half(weight0[row + col * K0]);
-    else w0Smem[row + col * K0pad] = __float2half(0.f);
+    if (row < K0 & col < N0) w0Smem[row + col * K0pad] = convert2half(weight0[row + col * K0]);
+    else w0Smem[row + col * K0pad] = convert2half(0.f);
   }
 
   for (int i = idx; i < N1pad * K1pad; i += blockDim.x * blockDim.y){
     int row = i % K1pad;
     int col = i / K1pad;
-    if (row < K1 & col < N1) w1Smem[row + col * K1pad] = __float2half(weight1[row + col * K1]);
-    else w1Smem[row + col * K1pad] = __float2half(0.f);
+    if (row < K1 & col < N1) w1Smem[row + col * K1pad] = convert2half(weight1[row + col * K1]);
+    else w1Smem[row + col * K1pad] = convert2half(0.f);
   }
   
   wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major>  in0_frag;
@@ -205,10 +224,10 @@ __global__ void simple2layer_wmma(
     int col = i % N0pad;
     if (col < N0) {
       float tmp[1];
-      tmp[0] = out0Smem[row*N0pad + col] + bias0[col];
+      tmp[0] = out0Smem[row*N0pad + col] + convert2float(bias0[col]);
       activate(activation0, tmp, 0);
-      in1Smem[row*N0pad + col] = __float2half(tmp[0]);
-    }else in1Smem[row*N0pad + col] = __float2half(0.f);
+      in1Smem[row*N0pad + col] = convert2half(tmp[0]);
+    }else in1Smem[row*N0pad + col] = convert2half(0.f);
   }
 
 
@@ -318,7 +337,7 @@ __global__ void simple2layer_wmma(
     
     if (col<N1 & (row + offset) < M0){
       float out[1];
-      out[0] = out1Smem[row*N1pad + col] + bias1[col]; //bias 1
+      out[0] = out1Smem[row*N1pad + col] + convert2float(bias1[col]); //bias 1
       activate(activation1, out, 0); //activation 1
       output[(row + offset) * N1 + col] = out[0];
     }
@@ -393,20 +412,24 @@ torch::Tensor  simple2layer(torch::Tensor& input,
                       (Mblock * N1pad + Mblock * K1pad) * sizeof(float); // intermediate output + final output
 
     // printf("Computing... using simple2layer_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-    simple2layer_wmma<<<gridDim, blockDim, smem_size>>>(input.data_ptr<float>(), 
-                                                  weight0.data_ptr<float>(), 
-                                                  bias0.data_ptr<float>(), 
-                                                  weight1.data_ptr<float>(),
-                                                  bias1.data_ptr<float>(),
-                                                  output.data_ptr<float>(),
-                                                  act0, 
-                                                  act1,
-                                                  Mblock, M0, N0, K0, N1, K1, 
-                                                  N0pad,  K0pad, N1pad, K1pad, 
-                                                  lda0Pad, ldb0Pad, ldb1Pad,
-                                                  lda0,
-                                                  ldb0,
-                                                  ldb1);
+    AT_DISPATCH_ALL_TYPES_AND_HALF(
+         input.scalar_type(), "simple2layer_wmma", ([&] {
+          simple2layer_wmma<<<gridDim, blockDim, smem_size>>>
+          (input.data_ptr<scalar_t>(), 
+            weight0.data_ptr<scalar_t>(), 
+            bias0.data_ptr<scalar_t>(), 
+            weight1.data_ptr<scalar_t>(),
+            bias1.data_ptr<scalar_t>(),
+            output.data_ptr<scalar_t>(),
+            act0, 
+            act1,
+            Mblock, M0, N0, K0, N1, K1, 
+            N0pad,  K0pad, N1pad, K1pad, 
+            lda0Pad, ldb0Pad, ldb1Pad,
+            lda0,
+            ldb0,
+            ldb1);
+    }));
 
     getLastCudaError("simple2layer_wmma launch failed\n");
     return output;
