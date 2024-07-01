@@ -413,14 +413,16 @@ torch::Tensor  simple2layer(torch::Tensor& input,
             ldb0,
             ldb1);
     }));
-
+    //     cudaDeviceSynchronize();
+    // cudaError_t errAsync = cudaDeviceSynchronize();
+    //     if (errAsync != cudaSuccess)
+    //       printf("simple2layer Async kernel error: %s\n", cudaGetErrorString(errAsync));
     cudaError_t errSync  = cudaGetLastError();
 
     if (errSync != cudaSuccess)
       printf("simple2layer Sync kernel error: %s\n", cudaGetErrorString(errSync));
-    //     cudaError_t errAsync = cudaDeviceSynchronize();
-    //     if (errAsync != cudaSuccess)
-    //       printf("simple2layer Async kernel error: %s\n", cudaGetErrorString(errAsync));
+
+
     return output;
 }
 

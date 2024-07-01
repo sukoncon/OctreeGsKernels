@@ -49,6 +49,10 @@ void simpleIdx(torch::Tensor indata,
                 maskIdx.data_ptr<int64_t>(),
                 outdata.data_ptr<scalar_t>());
      }));
+
+     cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("simpleIdx Sync kernel error: %s\n", cudaGetErrorString(errSync));
 }
 
 
@@ -83,6 +87,11 @@ torch::Tensor simpleMask(torch::Tensor indata,
                 maskIdx.data_ptr<int64_t>(),
                 outdata.data_ptr<scalar_t>());
      }));
+
+     cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("simpleMask Sync kernel error: %s\n", cudaGetErrorString(errSync));
+
      return outdata;
 }
 
@@ -193,6 +202,10 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
         x, y, z);
         }));
 
+    cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("ob_property Sync kernel error: %s\n", cudaGetErrorString(errSync));
+
 
     return {anchor, ob_view, ob_dist};
 
@@ -252,6 +265,10 @@ void catRepeatMaskSplit(
             out1.data_ptr<scalar_t>(),
             out2.data_ptr<scalar_t>());
      }));
+
+    cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("catRepeatMaskSplit Sync kernel error: %s\n", cudaGetErrorString(errSync));
 }
 
 
@@ -301,6 +318,10 @@ void RepeatMask(
             maskIdx.data_ptr<int64_t>(),
             out1.data_ptr<scalar_t>());
      }));
+
+    cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("RepeatMask Sync kernel error: %s\n", cudaGetErrorString(errSync));
 }
 
 
@@ -353,6 +374,10 @@ void MaskPostProcessColor(
             maskIdx.data_ptr<int64_t>(),
             out1.data_ptr<scalar_t>());
      }));
+
+    cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("MaskPostProcessColor Sync kernel error: %s\n", cudaGetErrorString(errSync));
 }
 
 template <typename scalar_t>
@@ -424,6 +449,9 @@ void RepeatMaskPostProcessOffsets(
             maskIdx.data_ptr<int64_t>(),
             xyz.data_ptr<scalar_t>());
      }));
+    cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("RepeatMaskPostProcessOffsets Sync kernel error: %s\n", cudaGetErrorString(errSync));
 }
 
 template <typename scalar_t>
@@ -472,10 +500,11 @@ void SelfContainedFeat(torch::Tensor feat,
             feat.data_ptr<scalar_t>(),
             bank_weight.data_ptr<scalar_t>());
         }));
+
+    cudaError_t errSync  = cudaGetLastError();
+    if (errSync != cudaSuccess)
+      printf("SelfContainedFeat Sync kernel error: %s\n", cudaGetErrorString(errSync));
 }
-
-
-
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
