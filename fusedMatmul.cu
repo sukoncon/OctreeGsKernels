@@ -14,23 +14,6 @@
 #include <cuda.h>
 #include <mma.h>
 
-// This will output the proper error string when calling cudaGetLastError
-#define getLastCudaError(msg) __getLastCudaError(msg, __FILE__, __LINE__)
-
-inline void __getLastCudaError(const char *errorMessage, const char *file,
-                               const int line) {
-  cudaError_t err = cudaGetLastError();
-
-  if (cudaSuccess != err) {
-    fprintf(stderr,
-            "%s(%i) : getLastCudaError() CUDA error :"
-            " %s : (%d) %s.\n",
-            file, line, errorMessage, static_cast<int>(err),
-            cudaGetErrorString(err));
-    exit(EXIT_FAILURE);
-  }
-}
-
 #define WMMA_M 16
 #define WMMA_N 16
 #define WMMA_K 16
@@ -149,7 +132,7 @@ __global__ void simple2layer_wmma(
   for (int i = idx; i < Mblock * K0pad; i += blockDim.x * blockDim.y){
     int row = i / K0pad;
     int col = i % K0pad;
-    if (col < K0) inSmem[row * K0pad + col] = convert2half(input[(row + offset) * K0 + col]);
+    if (col < K0 && (row + offset) < M0) inSmem[row * K0pad + col] = convert2half(input[(row + offset) * K0 + col]);
     else inSmem[row * K0pad + col] = convert2half(0.f);
   }
 
@@ -411,7 +394,7 @@ torch::Tensor  simple2layer(torch::Tensor& input,
     int smem_size = (Mblock * K0pad + K0pad * N0pad +  K1pad * N1pad + Mblock * N1pad) * sizeof(half) + // input + weights + intermediate output
                       (Mblock * N1pad + Mblock * K1pad) * sizeof(float); // intermediate output + final output
 
-    // printf("Computing... using simple2layer_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
+//     printf("Computing... using simple2layer_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
     AT_DISPATCH_ALL_TYPES_AND_HALF(
          input.scalar_type(), "simple2layer_wmma", ([&] {
           simple2layer_wmma<<<gridDim, blockDim, smem_size>>>
@@ -431,7 +414,13 @@ torch::Tensor  simple2layer(torch::Tensor& input,
             ldb1);
     }));
 
-    getLastCudaError("simple2layer_wmma launch failed\n");
+    cudaError_t errSync  = cudaGetLastError();
+
+    if (errSync != cudaSuccess)
+      printf("simple2layer Sync kernel error: %s\n", cudaGetErrorString(errSync));
+    //     cudaError_t errAsync = cudaDeviceSynchronize();
+    //     if (errAsync != cudaSuccess)
+    //       printf("simple2layer Async kernel error: %s\n", cudaGetErrorString(errAsync));
     return output;
 }
 
