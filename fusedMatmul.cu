@@ -395,6 +395,8 @@ torch::Tensor  simple2layer(torch::Tensor& input,
                       (Mblock * N1pad + Mblock * K1pad) * sizeof(float); // intermediate output + final output
 
 //     printf("Computing... using simple2layer_wmma kernel, blockDim.x %d, blockDim.y %d, gridDim.x %d, gridDim.y %d\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
+
+    if (M0 == 0) return output;
     AT_DISPATCH_ALL_TYPES_AND_HALF(
          input.scalar_type(), "simple2layer_wmma", ([&] {
           simple2layer_wmma<<<gridDim, blockDim, smem_size>>>

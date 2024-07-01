@@ -62,20 +62,22 @@ void simpleIdx(torch::Tensor indata,
 torch::Tensor simpleMask(torch::Tensor indata, 
                 torch::Tensor maskIdx){
                 
-        const int width = indata.numel()/indata.size(0);
+
         const int height = maskIdx.size(0);
-        
+
         // Get Input Tensor Shape info
         auto orig_shape = indata.sizes(); // auto -> c10::IntArrayRef
 
-        /* Clone original shape details into another instance*/ 
+        /* Clone original shape details into another instance*/
         std::vector<int64_t> out_shape(orig_shape.begin(), orig_shape.end());
-        /* Modify first entry i.e. 0th position item */ 
+        /* Modify first entry i.e. 0th position item */
         out_shape[0] = height;
         torch::Tensor outdata = torch::empty({out_shape}, indata.options());
 
-        const uint64_t num_elements = width * height;
+        if (maskIdx.numel() == 0) return outdata;
 
+        const int width = indata.numel()/indata.size(0);
+        const uint64_t num_elements = width * height;
         const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((height*width + blockDIM-1)/blockDIM));
         AT_DISPATCH_ALL_TYPES_AND_HALF(
          indata.scalar_type(), "simpleIdx_kernel", ([&] {
@@ -173,13 +175,13 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
     if(width != 3){
       throw std::invalid_argument("only support width of 3.");
     }
-    
+
     // Get Input Tensor Shape info
     auto orig_shape = indata.sizes(); // auto -> c10::IntArrayRef
 
-    /* Clone original shape details into another instance*/ 
+    /* Clone original shape details into another instance*/
     std::vector<int64_t> out_shape(orig_shape.begin(), orig_shape.end());
-    /* Modify first entry i.e. 0th position item */ 
+    /* Modify first entry i.e. 0th position item */
     out_shape[0] = height;
     torch::Tensor anchor = torch::empty({out_shape}, indata.options());
     torch::Tensor ob_view = torch::empty({out_shape}, indata.options());
@@ -195,7 +197,7 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
         height,
         width,
         indata.data_ptr<scalar_t>(),
-        anchor.data_ptr<scalar_t>(), 
+        anchor.data_ptr<scalar_t>(),
         ob_view.data_ptr<scalar_t>(),
         maskIdx.data_ptr<int64_t>(),
         ob_dist.data_ptr<scalar_t>(),
@@ -210,6 +212,7 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
     return {anchor, ob_view, ob_dist};
 
 }
+
 
 template <typename scalar_t>
 __global__ void catRepeatMaskSplit_kernel(
@@ -251,6 +254,7 @@ void catRepeatMaskSplit(
     const int height = maskIdx.size(0);
     const uint64_t num_elements = (width1 + width2) * height;
     const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements + blockDIM-1)/blockDIM));
+    if (maskIdx.numel() == 0) return;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       in1.scalar_type(), "catRepeatMaskSplit_kernel", ([&] {
             catRepeatMaskSplit_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -307,6 +311,7 @@ void RepeatMask(
     const int height = maskIdx.size(0);
     const uint64_t num_elements = (width1) * height;
     const uint32_t gridDIM = std::max(uint32_t(1), (uint32_t)((num_elements + blockDIM-1)/blockDIM));
+    if (maskIdx.numel() == 0) return;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       in1.scalar_type(), "RepeatMask_kernel", ([&] {
             RepeatMask_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -362,6 +367,8 @@ void MaskPostProcessColor(
     const int height = maskIdx.size(0);
     const uint64_t num_elements = (width1) * height;
     const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements + blockDIM-1)/blockDIM));
+
+    if (maskIdx.numel() == 0 ) return;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       in1.scalar_type(), "MaskPostProcessColor_kernel", ([&] {
             MaskPostProcessColor_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -434,7 +441,7 @@ void RepeatMaskPostProcessOffsets(
 
     const uint64_t num_elements = (w_out) * height;
     const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements + blockDIM-1)/blockDIM));
-
+    if (maskIdx.numel() == 0 ) return;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       grid_xyz.scalar_type(), "RepeatMaskPostProcessOffsets_kernel", ([&] {
             RepeatMaskPostProcessOffsets_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -489,7 +496,7 @@ void SelfContainedFeat(torch::Tensor feat,
         const int height = feat.size(0);
         const uint64_t num_elements = height*width;
         const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements+ blockDIM -1)/blockDIM));
-
+        if (feat.numel() == 0 ) return;
         AT_DISPATCH_ALL_TYPES_AND_HALF(
             feat.scalar_type(), "SelfContainedFeat_kernel", ([&] {
             SelfContainedFeat_kernel<scalar_t><<<gridDIM, blockDIM>>>
