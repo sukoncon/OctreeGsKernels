@@ -385,8 +385,8 @@ torch::Tensor  simple2layer(torch::Tensor& input,
     blockDim.x = blockDim_x;
     blockDim.y = int((max(N0, N1) + WMMA_N - 1) / WMMA_N);
 
-    gridDim.x = int((M0 + (WMMA_M * blockDim.x / warp_size - 1)) /
-                (WMMA_M * blockDim.x / warp_size));
+    gridDim.x = std::max(int((M0 + (WMMA_M * blockDim.x / warp_size - 1)) /
+                (WMMA_M * blockDim.x / warp_size)), 1);
     gridDim.y = 1; // assume N and K are small
 
     // store input block + weights + intermediate result in shared memory
@@ -414,9 +414,9 @@ torch::Tensor  simple2layer(torch::Tensor& input,
             ldb1);
     }));
     //     cudaDeviceSynchronize();
-    // cudaError_t errAsync = cudaDeviceSynchronize();
-    //     if (errAsync != cudaSuccess)
-    //       printf("simple2layer Async kernel error: %s\n", cudaGetErrorString(errAsync));
+//     cudaError_t errAsync = cudaDeviceSynchronize();
+//         if (errAsync != cudaSuccess)
+//           printf("simple2layer Async kernel error: %s\n", cudaGetErrorString(errAsync));
     cudaError_t errSync  = cudaGetLastError();
 
     if (errSync != cudaSuccess)

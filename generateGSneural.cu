@@ -38,7 +38,7 @@ void simpleIdx(torch::Tensor indata,
         const int width = indata.size(1);
         const int height = maskIdx.size(0);
         const uint64_t num_elements = width * height;
-        const uint32_t gridDIM = (height*width + blockDIM-1)/blockDIM;
+        const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((height*width + blockDIM-1)/blockDIM));
         AT_DISPATCH_FLOATING_TYPES_AND_HALF(
          indata.scalar_type(), "simpleIdx_kernel", ([&] {
                 simpleIdx_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -76,7 +76,7 @@ torch::Tensor simpleMask(torch::Tensor indata,
 
         const uint64_t num_elements = width * height;
 
-        const uint32_t gridDIM = (height*width + blockDIM-1)/blockDIM;
+        const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((height*width + blockDIM-1)/blockDIM));
         AT_DISPATCH_ALL_TYPES_AND_HALF(
          indata.scalar_type(), "simpleIdx_kernel", ([&] {
                 simpleIdx_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -186,7 +186,7 @@ std::vector<torch::Tensor>  ob_property(torch::Tensor indata, torch::Tensor mask
     out_shape[1] = 1;
     torch::Tensor ob_dist = torch::empty({out_shape}, indata.options());
 
-    const uint32_t gridDIM = (height + blockDIM-1)/blockDIM;
+    const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((height + blockDIM-1)/blockDIM));
 
     AT_DISPATCH_ALL_TYPES_AND_HALF(
         indata.scalar_type(),
@@ -250,7 +250,7 @@ void catRepeatMaskSplit(
     const int width2 = in2.size(1);
     const int height = maskIdx.size(0);
     const uint64_t num_elements = (width1 + width2) * height;
-    const uint32_t gridDIM = (num_elements + blockDIM-1)/blockDIM;
+    const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements + blockDIM-1)/blockDIM));
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       in1.scalar_type(), "catRepeatMaskSplit_kernel", ([&] {
             catRepeatMaskSplit_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -306,7 +306,7 @@ void RepeatMask(
     const int width1 = in1.size(1);
     const int height = maskIdx.size(0);
     const uint64_t num_elements = (width1) * height;
-    const uint32_t gridDIM = (num_elements + blockDIM-1)/blockDIM;
+    const uint32_t gridDIM = std::max(uint32_t(1), (uint32_t)((num_elements + blockDIM-1)/blockDIM));
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       in1.scalar_type(), "RepeatMask_kernel", ([&] {
             RepeatMask_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -361,7 +361,7 @@ void MaskPostProcessColor(
     const int width1 = in1.size(1);
     const int height = maskIdx.size(0);
     const uint64_t num_elements = (width1) * height;
-    const uint32_t gridDIM = (num_elements + blockDIM-1)/blockDIM;
+    const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements + blockDIM-1)/blockDIM));
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       in1.scalar_type(), "MaskPostProcessColor_kernel", ([&] {
             MaskPostProcessColor_kernel<scalar_t><<<gridDIM, blockDIM>>>
@@ -433,7 +433,7 @@ void RepeatMaskPostProcessOffsets(
     const int w_scale = scaling_repeat.size(1);
 
     const uint64_t num_elements = (w_out) * height;
-    const uint32_t gridDIM = (num_elements + blockDIM-1)/blockDIM;
+    const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements + blockDIM-1)/blockDIM));
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       grid_xyz.scalar_type(), "RepeatMaskPostProcessOffsets_kernel", ([&] {
@@ -488,7 +488,7 @@ void SelfContainedFeat(torch::Tensor feat,
         const int width = feat.size(1);
         const int height = feat.size(0);
         const uint64_t num_elements = height*width;
-        const uint32_t gridDIM = (num_elements+ blockDIM -1)/blockDIM;
+        const uint32_t gridDIM = std::max(uint32_t(1), uint32_t((num_elements+ blockDIM -1)/blockDIM));
 
         AT_DISPATCH_ALL_TYPES_AND_HALF(
             feat.scalar_type(), "SelfContainedFeat_kernel", ([&] {
