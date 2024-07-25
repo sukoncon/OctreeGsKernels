@@ -9,16 +9,23 @@ if triton.__version__ >= "3.0.0":
     from triton.language.extra.cuda.libdevice import fast_tanf as tl_tan
     from triton.language.extra.cuda.libdevice import fast_powf as tl_pow
 else:
-    from triton.language.math import fast_expf as tl_exp
-    from triton.language.math import fast_logf as tl_log
+    assert 0, "only support when triton.__version__ >= '3.0.0'"
 
+@triton.jit()
+def tl_activation(x, activation):
+    if activation == 1: # relu
+        return tl.where(x >= 0, x, 0)
+    elif activation == 2: # sigmoid
+        return 1 / (1 + tl_exp(-x))
+    else:
+        return x
 
 @triton.autotune(
     configs = [
         triton.Config({'block_m': BM, 'block_k': BK}, num_stages=s, num_warps=w) \
-        for BM in [128] \
+        for BM in [64] \
         for BK in [32] \
-        for s in [1] \
+        for s in [3] \
         for w in [4] \
     ],
     key=['n0', 'n1', 'n2'],
@@ -26,9 +33,9 @@ else:
 
 @triton.jit()
 def mlp_3layer_fwd_kernel(in_ptr, 
-            w0_ptr, b0_ptr, a0,
-            w1_ptr, b1_ptr, a1,
-            w2_ptr, b2_ptr, a2,
+            w0_ptr, b0_ptr, a0: tl.constexpr,
+            w1_ptr, b1_ptr, a1: tl.constexpr,
+            w2_ptr, b2_ptr, a2: tl.constexpr,
             out_ptr,
             m, n0, k0, n0_pad: tl.constexpr, k0_pad: tl.constexpr,
             n1, k1, n1_pad: tl.constexpr, k1_pad: tl.constexpr,
@@ -50,8 +57,8 @@ def mlp_3layer_fwd_kernel(in_ptr,
 
     # the first layer
     for k in range(0, tl.cdiv(k0, block_k)):
-        input = tl.load(input_ptrs, mask = offs_k[None, :] < k0, other = 0.0).to(tl.float32)
-        weight = tl.load(w0_ptrs, mask = offs_k[:, None] < k0, other = 0.0).to(tl.float32)
+        input = tl.load(input_ptrs, mask = offs_k[None, :] < k0, other = 0.0)
+        weight = tl.load(w0_ptrs, mask = offs_k[:, None] < k0, other = 0.0)
         # tl.device_print("before out0", out0)
         out0 += tl.dot(input, weight, out_dtype = tl.float32)
         # tl.device_print("after out0", out0)
@@ -61,30 +68,29 @@ def mlp_3layer_fwd_kernel(in_ptr,
     
     # tl.debug_barrier()
     b0_ptrs = b0_ptr + tl.arange(0, n0_pad)[None, :] 
-    b0 = tl.load(b0_ptrs).to(tl.float32)
+    b0 = tl.load(b0_ptrs)
     out0 = b0 + out0
-    
-    
+    out0 = tl_activation(out0, a0)
 
     # the second layer
     w1_ptrs = w1_ptr + tl.arange(0, k1_pad)[:, None] + tl.arange(0, n1_pad)[None, :] * k1
-    weight = tl.load(w1_ptrs).to(tl.float32)
+    weight = tl.load(w1_ptrs)
     out1 = tl.dot(out0, weight, out_dtype = tl.float32)
 
     b1_ptrs = b1_ptr + tl.arange(0, n1_pad)[None, :]
-    b1 = tl.load(b1_ptrs, mask = tl.arange(0, n1_pad)[None, :] < n1, other = 0.0).to(tl.float32)
+    b1 = tl.load(b1_ptrs, mask = tl.arange(0, n1_pad)[None, :] < n1, other = 0.0)
     out1 += b1
+    out1 = tl_activation(out1, a1)
     
-    
-
     # the third layer
     w2_ptrs = w2_ptr + tl.arange(0, k2_pad)[:, None] + tl.arange(0, n2_pad)[None, :] * k2
-    weight = tl.load(w2_ptrs).to(tl.float32)
+    weight = tl.load(w2_ptrs)
     out2 = tl.dot(out1, weight, out_dtype = tl.float32)
 
     b2_ptrs = b2_ptr + tl.arange(0, n2_pad)[None, :]
-    b2 = tl.load(b2_ptrs, mask = tl.arange(0, n2_pad)[None, :] < n2, other = 0.0).to(tl.float32)
-    out2 += b2
+    b2 = tl.load(b2_ptrs, mask = tl.arange(0, n2_pad)[None, :] < n2, other = 0.0)
+    out2 = out2 + b2
+    out2 = tl_activation(out2, a2)
     # tl.device_print("out2", out2)
 
     out_ptrs = out_ptr + offs_m[:, None] * n2 + tl.arange(0, n2_pad)[None, :]
@@ -115,7 +121,6 @@ def fused3layer(input,
     if output is None:
         # print("Creat c from scratch")
         output = torch.empty((m, n2), device = input.device, dtype = input.dtype)
-    # import pdb; pdb.set_trace()
 
     grid = lambda META: (triton.cdiv(m, META["block_m"]), 1, 1)
     mlp_3layer_fwd_kernel[grid](input, 
@@ -126,6 +131,7 @@ def fused3layer(input,
             m, n0, k0, n0_pad, k0_pad,
             n1, k1, n1_pad, k1_pad,
             n2, k2, n2_pad, k2_pad)
+    # print(mlp_3layer_fwd_kernel.best_config)
     return output
 
 if __name__ == "__main__":
@@ -134,44 +140,24 @@ if __name__ == "__main__":
 
     device = "cuda:0"
     torch.cuda.set_device(device)
-    m = 128*100
+    m = 128*1000
     input = torch.randn((m, 150), dtype = torch.float32, device = device)
 
     mlp = nn.Sequential(
-            nn.Linear(in_features=150, out_features=64),
-            # nn.ReLU(inplace=True),
-            nn.Linear(in_features=64, out_features=64),
-            # nn.ReLU(inplace=True),
-            nn.Linear(in_features=64, out_features=3),
-            # nn.Sigmoid(),
+            nn.Linear(in_features=150, out_features=128),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=128, out_features=128),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=128, out_features=3),
+            nn.Sigmoid(),
         ).cuda()
     
     keys = mlp.state_dict().keys()
     weight_keys = list(filter(lambda x: 'weight' in x, keys))
     bias_keys = list(filter(lambda x: 'bias' in x, keys))
 
-    assert len(weight_keys) == 3, "Only support when layers of mlp == 3"
+    assert len(weight_keys) == 3, "Only support when nn.Linear layers of mlp == 3"
 
-    weights = []
-    bias = []
-
-    def judge_activation_layer(layer):
-        """
-        Given a PyTorch layer object, determine if it uses ReLU or Sigmoid activation function.
-
-        Args:
-            layer (nn.Module): The PyTorch module representing the layer you want to check.
-
-        Returns:
-            int: Returns 1 for ReLU layers, 2 for sigmoid layers, else raises an assertion error.
-        """
-        
-        # Check if the layer is an instance of either ReLU or Sigmoid class from `nn`
-        if isinstance(layer, nn.ReLU):
-            return 1
-        elif isinstance(layer, nn.Sigmoid):
-            return 2
-    
     w0 = mlp.state_dict()[weight_keys[0]]
     w1 = mlp.state_dict()[weight_keys[1]]
     w2 = mlp.state_dict()[weight_keys[2]]
@@ -180,17 +166,29 @@ if __name__ == "__main__":
     b1 = mlp.state_dict()[bias_keys[1]]
     b2 = mlp.state_dict()[bias_keys[2]]
     
-    # w0 *= 0; w0 += 0;
-    # w1 *= 0; w1 += 0;
-    # w2 *= 0; w2 += 0;
-    # b0 *= 0; b1 *= 0; b2 *= 0; 
-    # b0 += 2; b1 += 1; b2 += 1;     w2 *= 0; w2 += 1;
+    def act_fn(layer):
+        # Check if the layer is an instance of either ReLU or Sigmoid class from `nn`
+        if isinstance(layer, nn.ReLU):
+            return 1
+        elif isinstance(layer, nn.Sigmoid):
+            return 2
+        else:
+            assert 0, "only support when activation = relu or sigmoid"
 
+    if int(weight_keys[1][0]) - int(weight_keys[0][0]) == 2:
+        a0 = act_fn(mlp[int(weight_keys[0][0]) + 1])
+    else:
+        a0 = 0
+    if int(weight_keys[2][0]) - int(weight_keys[1][0]) == 2:
+        a1 = act_fn(mlp[int(weight_keys[1][0]) + 1])
+    else:
+        a1 = 0
+    if (len(mlp) - 1) == (int(weight_keys[2][0]) + 1):
+        a2 = act_fn(mlp[int(weight_keys[2][0]) + 1])
+    else:
+        a2 = 0
 
-    a0 = 0
-    a1 = 0
-    a2 = 0
-    for i in range(10):
+    for i in range(5):
         torch.cuda.synchronize(); start = time.time()
         torch_out = mlp(input)
         torch.cuda.synchronize(); end = time.time()
