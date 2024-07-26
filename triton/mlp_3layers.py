@@ -6,8 +6,8 @@ import time
 if triton.__version__ >= "3.0.0":
     from triton.language.extra.cuda.libdevice import fast_expf as tl_exp
     from triton.language.extra.cuda.libdevice import fast_logf as tl_log
-    from triton.language.extra.cuda.libdevice import fast_tanf as tl_tan
-    from triton.language.extra.cuda.libdevice import fast_powf as tl_pow
+    from triton.language.extra.cuda.libdevice import tanh as tl_tanh
+
 else:
     assert 0, "only support when triton.__version__ >= '3.0.0'"
 
@@ -15,8 +15,14 @@ else:
 def tl_activation(x, activation):
     if activation == 1: # relu
         return tl.where(x >= 0, x, 0)
-    elif activation == 2: # sigmoid
+    # if activation == 2: # Leaky ReLU
+    #     return tl.where(x >= 0, x, 0)
+    if activation == 3: # sigmoid
         return 1 / (1 + tl_exp(-x))
+    if activation == 4: # Softplus
+        return tl_log(1 + tl_exp(x))
+    if activation == 5: # Tanh
+        return tl_tanh(x)
     else:
         return x
 
@@ -145,9 +151,9 @@ if __name__ == "__main__":
 
     mlp = nn.Sequential(
             nn.Linear(in_features=150, out_features=128),
-            nn.ReLU(inplace=True),
+            nn.Softplus(),
             nn.Linear(in_features=128, out_features=128),
-            nn.ReLU(inplace=True),
+            nn.Tanh(),
             nn.Linear(in_features=128, out_features=3),
             nn.Sigmoid(),
         ).cuda()
@@ -166,14 +172,20 @@ if __name__ == "__main__":
     b1 = mlp.state_dict()[bias_keys[1]]
     b2 = mlp.state_dict()[bias_keys[2]]
     
-    def act_fn(layer):
-        # Check if the layer is an instance of either ReLU or Sigmoid class from `nn`
-        if isinstance(layer, nn.ReLU):
-            return 1
-        elif isinstance(layer, nn.Sigmoid):
-            return 2
-        else:
-            assert 0, "only support when activation = relu or sigmoid"
+    def act_fn(activation):
+        if isinstance(activation, torch.nn.ReLU):
+            return 1 # "ReLU"
+        # if isinstance(activation, torch.nn.LeakyReLU):
+        #     return 2 # "Leaky ReLU"
+        if isinstance(activation, torch.nn.Sigmoid):
+            return 3 # "Sigmoid"
+        if isinstance(activation, torch.nn.Softplus):
+            return 4 # "Softplus"
+        if isinstance(activation, torch.nn.Tanh):
+            return 5 #"Tanh"
+        if isinstance(activation, type(None)):
+            return 0 # "None"
+        assert 0, "only support when activation = relu or sigmoid"
 
     if int(weight_keys[1][0]) - int(weight_keys[0][0]) == 2:
         a0 = act_fn(mlp[int(weight_keys[0][0]) + 1])
