@@ -57,7 +57,7 @@ def mlp_3layer_fwd_kernel(in_ptr,
 
     # the first layer
     for k in range(0, tl.cdiv(k0, block_k)):
-        input = tl.load(input_ptrs, mask = offs_k[None, :] < k0, other = 0.0)
+        input = tl.load(input_ptrs, mask = (offs_k[None, :] < k0) & (offs_m[:, None] < m), other = 0.0)
         weight = tl.load(w0_ptrs, mask = offs_k[:, None] < k0, other = 0.0)
         # tl.device_print("before out0", out0)
         out0 += tl.dot(input, weight, out_dtype = tl.float32)
@@ -94,7 +94,7 @@ def mlp_3layer_fwd_kernel(in_ptr,
     # tl.device_print("out2", out2)
 
     out_ptrs = out_ptr + offs_m[:, None] * n2 + tl.arange(0, n2_pad)[None, :]
-    tl.store(out_ptrs, out2, mask = tl.arange(0, n2_pad)[None, :] < n2)
+    tl.store(out_ptrs, out2, mask = (tl.arange(0, n2_pad)[None, :] < n2) & (offs_m[:, None] < m))
     
 
 
@@ -140,7 +140,7 @@ if __name__ == "__main__":
 
     device = "cuda:0"
     torch.cuda.set_device(device)
-    m = 128*1000
+    m = 124308
     input = torch.randn((m, 150), dtype = torch.float32, device = device)
 
     mlp = nn.Sequential(
